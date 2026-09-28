@@ -10,6 +10,7 @@
         "inertiajs/inertia-laravel": "^2.0",
         "kyon147/laravel-shopify": "^27.1",
         "laravel/framework": "^13.17",
+        "laravel/sail": "^1.68",
         "laravel/sanctum": "^4.0",
         "laravel/tinker": "^3.0",
         "tightenco/ziggy": "^2.0"

@@ -18,7 +18,14 @@ return Application::configure(basePath: dirname(__DIR__))
             \Illuminate\Http\Middleware\AddLinkHeadersForPreloadedAssets::class,
         ]);
 
-        //
+        $middleware->preventRequestForgery(except: [
+            '*',
+        ]);
+
+        $middleware->alias([
+            'ngrok.headers' => \App\Http\Middleware\CustomHeaders::class,
+            'handle.cors' => \Illuminate\Http\Middleware\HandleCors::class,
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(

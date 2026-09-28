@@ -131,6 +131,8 @@ return [
     |
     */
 
-    'serializable_classes' => false,
 
+    'serializable_classes' => [
+        \App\Models\User::class,
+    ],
 ];
