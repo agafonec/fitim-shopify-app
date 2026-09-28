@@ -39,7 +39,24 @@ class User extends Authenticatable implements IShopModel
     protected $hidden = [
         'password',
         'remember_token',
+        'api_token',
     ];
+
+    /**
+     * The shop's API token, created on first use.
+     */
+    public function apiToken(): string
+    {
+        if ($this->api_token && $this->tokens()->where('name', 'api')->exists()) {
+            return $this->api_token;
+        }
+
+        $this->tokens()->where('name', 'api')->delete();
+
+        $this->forceFill(['api_token' => $this->createToken('api')->plainTextToken])->save();
+
+        return $this->api_token;
+    }
 
     /**
      * Get the attributes that should be cast.
@@ -50,6 +67,7 @@ class User extends Authenticatable implements IShopModel
     {
         return [
             'email_verified_at' => 'datetime',
+            'api_token' => 'encrypted',
 //            'password' => 'hashed',
         ];
     }

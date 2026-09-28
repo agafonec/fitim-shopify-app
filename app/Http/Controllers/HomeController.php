@@ -10,7 +10,8 @@ class HomeController extends Controller
     public function home(Request $request)
     {
         return Inertia::render('Home', [
-            'test' => "test string"
+            'shopName' => $request->user()->name,
+            'apiToken' => $request->user()->apiToken(),
         ]);
     }
 }

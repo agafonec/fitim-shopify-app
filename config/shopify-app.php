@@ -193,7 +193,7 @@ return [
     |
     */
 
-    'api_scopes' => env('SHOPIFY_API_SCOPES', 'read_products,write_products,read_themes'),
+    'api_scopes' => env('SHOPIFY_API_SCOPES', 'read_products,write_products,read_themes,read_inventory,read_locations'),
 
     /*
     |--------------------------------------------------------------------------
