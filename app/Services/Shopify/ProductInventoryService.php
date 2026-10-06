@@ -5,7 +5,7 @@ namespace App\Services\Shopify;
 use Osiset\ShopifyApp\Contracts\ShopModel;
 
 /**
- * Reads products, their variants and per-location inventory quantities
+ * Reads products (with their options), their variants (with selected option values) and per-location inventory quantities
  * through the Shopify Admin GraphQL API.
  *
  * Products and variants are fetched in separate queries: nesting
@@ -44,6 +44,20 @@ class ProductInventoryService
         fragment ProductFields on Product {
           id
           title
+          handle
+          status
+          description
+          descriptionHtml
+          priceRangeV2 {
+            minVariantPrice { amount currencyCode }
+            maxVariantPrice { amount currencyCode }
+          }
+          options {
+            id
+            name
+            position
+            optionValues { id name hasVariants }
+          }
           media(first: $mediaFirst) {
             pageInfo { hasNextPage endCursor }
             nodes { ...MediaFields }
@@ -68,7 +82,10 @@ class ProductInventoryService
           sku
           barcode
           position
+          price
+          compareAtPrice
           inventoryQuantity
+          selectedOptions { name value }
           product { id }
           inventoryItem {
             id
@@ -107,10 +124,10 @@ class ProductInventoryService
             GQL.self::PRODUCT_FIELDS, [
             'first' => $perPage,
             'after' => $cursor,
-            // Roughly 3 points per product plus 2 per image, times the page size.
+            // Roughly 8 points per product plus 2 per image, times the page size.
             'mediaFirst' => max(1, min(
                 self::MAX_IMAGES_PER_PRODUCT,
-                intdiv(intdiv(self::PRODUCTS_QUERY_BUDGET, $perPage) - 3, 2),
+                intdiv(intdiv(self::PRODUCTS_QUERY_BUDGET, $perPage) - 8, 2),
             )),
         ]);
 
@@ -208,9 +225,33 @@ class ProductInventoryService
             'id' => $this->toLegacyId($product['id']),
             'gid' => $product['id'],
             'title' => $product['title'],
+            'handle' => $product['handle'],
+            'status' => $product['status'],
+            'description' => $product['description'],
+            'description_html' => $product['descriptionHtml'],
+            'price_range' => [
+                'min' => $product['priceRangeV2']['minVariantPrice']['amount'],
+                'max' => $product['priceRangeV2']['maxVariantPrice']['amount'],
+                'currency' => $product['priceRangeV2']['minVariantPrice']['currencyCode'],
+            ],
+            'options' => array_map($this->formatOption(...), $product['options']),
             'images' => $this->formatImages($product),
             'variants' => $variantsByProduct[$product['id']] ?? [],
         ], $products);
+    }
+
+    private function formatOption(array $option): array
+    {
+        return [
+            'id' => $this->toLegacyId($option['id']),
+            'name' => $option['name'],
+            'position' => $option['position'],
+            'values' => array_map(fn (array $value) => [
+                'id' => $this->toLegacyId($value['id']),
+                'name' => $value['name'],
+                'has_variants' => $value['hasVariants'],
+            ], $option['optionValues']),
+        ];
     }
 
     private function formatImages(array $product): array
@@ -327,6 +368,9 @@ class ProductInventoryService
             'sku' => $variant['sku'],
             'barcode' => $variant['barcode'],
             'position' => $variant['position'],
+            'price' => $variant['price'],
+            'compare_at_price' => $variant['compareAtPrice'],
+            'options' => $variant['selectedOptions'],
             'inventory_item_id' => $this->toLegacyId($item['id']),
             'inventory_tracked' => $item['tracked'],
             'total_available' => $variant['inventoryQuantity'],
