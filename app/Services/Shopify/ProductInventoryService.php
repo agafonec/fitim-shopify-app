@@ -5,7 +5,7 @@ namespace App\Services\Shopify;
 use Osiset\ShopifyApp\Contracts\ShopModel;
 
 /**
- * Reads products, their variants and per-location inventory quantities
+ * Reads products (with their options), their variants (with selected option values) and per-location inventory quantities
  * through the Shopify Admin GraphQL API.
  *
  * Products and variants are fetched in separate queries: nesting
@@ -44,6 +44,20 @@ class ProductInventoryService
         fragment ProductFields on Product {
           id
           title
+          handle
+          status
+          description
+          descriptionHtml
+          priceRangeV2 {
+            minVariantPrice { amount currencyCode }
+            maxVariantPrice { amount currencyCode }
+          }
+          options {
+            id
+            name
+            position
+            optionValues { id name hasVariants }
+          }
           media(first: $mediaFirst) {
             pageInfo { hasNextPage endCursor }
             nodes { ...MediaFields }
@@ -68,7 +82,12 @@ class ProductInventoryService
           sku
           barcode
           position
+          price
+          compareAtPrice
           inventoryQuantity
+          selectedOptions { name value }
+          mainColor: metafield(namespace: "custom", key: "main_color") { value }
+          secondaryColor: metafield(namespace: "custom", key: "secondary_color") { value }
           product { id }
           inventoryItem {
             id
@@ -79,6 +98,28 @@ class ProductInventoryService
             }
           }
         }
+        GQL.self::LEVEL_FIELDS;
+
+    /** Lean variant shape for the inventory endpoints: identifiers plus stock levels only. */
+    private const INVENTORY_VARIANT_FIELDS = <<<'GQL'
+        fragment VariantFields on ProductVariant {
+          id
+          title
+          sku
+          barcode
+          position
+          product { id }
+          inventoryItem {
+            id
+            inventoryLevels(first: $levelsFirst) {
+              pageInfo { hasNextPage endCursor }
+              nodes { ...LevelFields }
+            }
+          }
+        }
+        GQL.self::LEVEL_FIELDS;
+
+    private const LEVEL_FIELDS = <<<'GQL'
 
         fragment LevelFields on InventoryLevel {
           location { id name }
@@ -107,10 +148,10 @@ class ProductInventoryService
             GQL.self::PRODUCT_FIELDS, [
             'first' => $perPage,
             'after' => $cursor,
-            // Roughly 3 points per product plus 2 per image, times the page size.
+            // Roughly 8 points per product plus 2 per image, times the page size.
             'mediaFirst' => max(1, min(
                 self::MAX_IMAGES_PER_PRODUCT,
-                intdiv(intdiv(self::PRODUCTS_QUERY_BUDGET, $perPage) - 3, 2),
+                intdiv(intdiv(self::PRODUCTS_QUERY_BUDGET, $perPage) - 8, 2),
             )),
         ]);
 
@@ -141,6 +182,75 @@ class ProductInventoryService
 
             $cursor = $page['page_info']['end_cursor'];
         } while ($page['page_info']['has_next_page']);
+    }
+
+    /**
+     * One page of products reduced to id, title and each variant's id, title, sku, barcode and inventory.
+     *
+     * @return array{products: array<int, array>, page_info: array{has_next_page: bool, end_cursor: ?string}}
+     */
+    public function paginateInventory(int $perPage = 20, ?string $cursor = null): array
+    {
+        $data = $this->query(<<<'GQL'
+            query ($first: Int!, $after: String) {
+              products(first: $first, after: $after, sortKey: ID) {
+                pageInfo { hasNextPage endCursor }
+                nodes { id title }
+              }
+            }
+            GQL, ['first' => $perPage, 'after' => $cursor]);
+
+        $products = $data['products']['nodes'];
+        $variantsByProduct = $products === [] ? [] : $this->variantsForProducts(array_column($products, 'id'), inventoryOnly: true);
+
+        return [
+            'products' => array_map(fn (array $product) => [
+                'id' => $this->toLegacyId($product['id']),
+                'gid' => $product['id'],
+                'title' => $product['title'],
+                'variants' => array_map(fn (array $variant) => [
+                    'id' => $variant['id'],
+                    'gid' => $variant['gid'],
+                    'title' => $variant['title'],
+                    'sku' => $variant['sku'],
+                    'barcode' => $variant['barcode'],
+                    'inventory' => $variant['inventory'],
+                ], $variantsByProduct[$product['id']] ?? []),
+            ], $products),
+            'page_info' => [
+                'has_next_page' => $data['products']['pageInfo']['hasNextPage'],
+                'end_cursor' => $data['products']['pageInfo']['endCursor'],
+            ],
+        ];
+    }
+
+    /**
+     * Per-variant inventory of a single product, looked up by product id, sku or barcode.
+     *
+     * @param  'product_id'|'sku'|'barcode'  $field
+     */
+    public function findInventory(string $field, string $value): ?array
+    {
+        $productGid = $field === 'product_id'
+            ? $this->toGid('Product', $value)
+            : $this->productGidByVariantField($field, $value);
+
+        // Every product has at least one variant, so no variants means no product.
+        $variants = $productGid ? ($this->variantsForProducts([$productGid], inventoryOnly: true)[$productGid] ?? []) : [];
+
+        if ($variants === []) {
+            return null;
+        }
+
+        return [
+            'id' => $this->toLegacyId($productGid),
+            'gid' => $productGid,
+            'variants' => array_map(fn (array $variant) => [
+                'id' => $variant['id'],
+                'gid' => $variant['gid'],
+                'inventory' => $variant['inventory'],
+            ], $variants),
+        ];
     }
 
     public function findByProductId(string|int $productId): ?array
@@ -176,6 +286,13 @@ class ProductInventoryService
      */
     private function findByVariantField(string $field, string $value): ?array
     {
+        $productGid = $this->productGidByVariantField($field, $value);
+
+        return $productGid ? $this->findByProductId($productGid) : null;
+    }
+
+    private function productGidByVariantField(string $field, string $value): ?string
+    {
         $data = $this->query(<<<'GQL'
             query ($query: String!) {
               productVariants(first: 10, query: $query) {
@@ -186,7 +303,7 @@ class ProductInventoryService
 
         foreach ($data['productVariants']['nodes'] as $variant) {
             if ($variant[$field] === $value) {
-                return $this->findByProductId($variant['product']['id']);
+                return $variant['product']['id'];
             }
         }
 
@@ -208,9 +325,33 @@ class ProductInventoryService
             'id' => $this->toLegacyId($product['id']),
             'gid' => $product['id'],
             'title' => $product['title'],
+            'handle' => $product['handle'],
+            'status' => $product['status'],
+            'description' => $product['description'],
+            'description_html' => $product['descriptionHtml'],
+            'price_range' => [
+                'min' => $product['priceRangeV2']['minVariantPrice']['amount'],
+                'max' => $product['priceRangeV2']['maxVariantPrice']['amount'],
+                'currency' => $product['priceRangeV2']['minVariantPrice']['currencyCode'],
+            ],
+            'options' => array_map($this->formatOption(...), $product['options']),
             'images' => $this->formatImages($product),
             'variants' => $variantsByProduct[$product['id']] ?? [],
         ], $products);
+    }
+
+    private function formatOption(array $option): array
+    {
+        return [
+            'id' => $this->toLegacyId($option['id']),
+            'name' => $option['name'],
+            'position' => $option['position'],
+            'values' => array_map(fn (array $value) => [
+                'id' => $this->toLegacyId($value['id']),
+                'name' => $value['name'],
+                'has_variants' => $value['hasVariants'],
+            ], $option['optionValues']),
+        ];
     }
 
     private function formatImages(array $product): array
@@ -267,7 +408,7 @@ class ProductInventoryService
      * @param  string[]  $productGids
      * @return array<string, array<int, array>> Formatted variants keyed by product GID, in position order.
      */
-    private function variantsForProducts(array $productGids): array
+    private function variantsForProducts(array $productGids, bool $inventoryOnly = false): array
     {
         $search = implode(' OR ', array_map(
             fn (string $gid) => 'product_id:'.$this->toLegacyId($gid),
@@ -285,7 +426,7 @@ class ProductInventoryService
                     nodes { ...VariantFields }
                   }
                 }
-                GQL.self::VARIANT_FIELDS, [
+                GQL.($inventoryOnly ? self::INVENTORY_VARIANT_FIELDS : self::VARIANT_FIELDS), [
                 'first' => self::VARIANTS_PER_QUERY,
                 'after' => $cursor,
                 'query' => $search,
@@ -294,7 +435,9 @@ class ProductInventoryService
             ]);
 
             foreach ($data['productVariants']['nodes'] as $variant) {
-                $grouped[$variant['product']['id']][] = $this->formatVariant($variant);
+                $grouped[$variant['product']['id']][] = $inventoryOnly
+                    ? $this->formatInventoryVariant($variant)
+                    : $this->formatVariant($variant);
             }
 
             $pageInfo = $data['productVariants']['pageInfo'];
@@ -311,14 +454,6 @@ class ProductInventoryService
     private function formatVariant(array $variant): array
     {
         $item = $variant['inventoryItem'];
-        $levels = $item['inventoryLevels']['nodes'];
-
-        if ($item['inventoryLevels']['pageInfo']['hasNextPage']) {
-            $levels = array_merge($levels, $this->remainingLevels(
-                $item['id'],
-                $item['inventoryLevels']['pageInfo']['endCursor'],
-            ));
-        }
 
         return [
             'id' => $this->toLegacyId($variant['id']),
@@ -327,11 +462,43 @@ class ProductInventoryService
             'sku' => $variant['sku'],
             'barcode' => $variant['barcode'],
             'position' => $variant['position'],
+            'price' => $variant['price'],
+            'compare_at_price' => $variant['compareAtPrice'],
+            'options' => $variant['selectedOptions'],
+            'main_color' => $variant['mainColor']['value'] ?? null,
+            'secondary_color' => $variant['secondaryColor']['value'] ?? null,
             'inventory_item_id' => $this->toLegacyId($item['id']),
             'inventory_tracked' => $item['tracked'],
             'total_available' => $variant['inventoryQuantity'],
-            'inventory' => array_map($this->formatLevel(...), $levels),
+            'inventory' => $this->formatLevels($item),
         ];
+    }
+
+    private function formatInventoryVariant(array $variant): array
+    {
+        return [
+            'id' => $this->toLegacyId($variant['id']),
+            'gid' => $variant['id'],
+            'title' => $variant['title'],
+            'sku' => $variant['sku'],
+            'barcode' => $variant['barcode'],
+            'position' => $variant['position'],
+            'inventory' => $this->formatLevels($variant['inventoryItem']),
+        ];
+    }
+
+    private function formatLevels(array $inventoryItem): array
+    {
+        $levels = $inventoryItem['inventoryLevels']['nodes'];
+
+        if ($inventoryItem['inventoryLevels']['pageInfo']['hasNextPage']) {
+            $levels = array_merge($levels, $this->remainingLevels(
+                $inventoryItem['id'],
+                $inventoryItem['inventoryLevels']['pageInfo']['endCursor'],
+            ));
+        }
+
+        return array_map($this->formatLevel(...), $levels);
     }
 
     private function formatLevel(array $level): array
