@@ -86,6 +86,8 @@ class ProductInventoryService
           compareAtPrice
           inventoryQuantity
           selectedOptions { name value }
+          mainColor: metafield(namespace: "custom", key: "main_color") { value }
+          secondaryColor: metafield(namespace: "custom", key: "secondary_color") { value }
           product { id }
           inventoryItem {
             id
@@ -463,6 +465,8 @@ class ProductInventoryService
             'price' => $variant['price'],
             'compare_at_price' => $variant['compareAtPrice'],
             'options' => $variant['selectedOptions'],
+            'main_color' => $variant['mainColor']['value'] ?? null,
+            'secondary_color' => $variant['secondaryColor']['value'] ?? null,
             'inventory_item_id' => $this->toLegacyId($item['id']),
             'inventory_tracked' => $item['tracked'],
             'total_available' => $variant['inventoryQuantity'],
